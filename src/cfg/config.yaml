@@ -1,0 +1,13 @@
+defaults:
+  - project: default
+  - exp: default
+  # to stop hydra from creating logs
+  - _self_  
+  - override hydra/hydra_logging: disabled  
+  - override hydra/job_logging: disabled  
+
+# to stop hydra from creating logs
+hydra:  
+  output_subdir: null  
+  run:  
+    dir: .
