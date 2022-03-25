@@ -7,16 +7,14 @@ import tqdm
 import tqdm.rich
 import logging
 import random
-import string
-from datetime import datetime
-import yaml, json
-import os, sys, time, copy, pickle
+import os, sys, copy
 from omegaconf import OmegaConf
 import wandb
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from logging.handlers import QueueHandler
+from logger import Logger, WorkerLogFilter
 class Trainer(object):
     def __init__(self, module, dataset, distributed,**kwargs):
         self.module = module
@@ -24,37 +22,20 @@ class Trainer(object):
         self.kwargs = copy.deepcopy(kwargs)
         self.trainer_kwargs = self.kwargs['trainer_kwargs']
         self.distributed = distributed
+        # if self.distributed: mp.set_start_method("spawn", force=True)
+        # self.logger = Logger(
+        #     self.kwargs['project'],
+        #     self.kwargs['exp_name'],
+        #     self.kwargs['save_dir'],
+        #     self.kwargs,
+        #     distributed
+        # )
         self.seed = self.trainer_kwargs['seed'] if 'seed' in self.trainer_kwargs.keys() else random.randint(1, 10000)
         self.history = {'train': {'loss': [], 'correct': []}, 'val': {'loss': [], 'correct': []}}
         self.epoch_history = {'train': {'loss': [], 'acc': []}, 'val': {'loss': [], 'acc': []}}
-        self.events = self.kwargs['events'] if 'events' in self.kwargs.keys() else None
-        # self.set_exp_path()
-    def set_exp_path(self):
-        random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-        today = datetime.today().strftime("%Y-%m-%d")
-        curr_time = datetime.today().strftime("%H-%M")
-        exp_name = self.kwargs["exp_name"].replace(" ","_")
-        save_dir = self.trainer_kwargs['save_dir'] if self.trainer_kwargs['save_dir'][-1] != '/' else self.trainer_kwargs['save_dir'][:-1]
-        self.exp_path = f'{save_dir}/{today}/{curr_time}-{exp_name}-{random_str}'
-        # create dir if not exists
-        if not os.path.exists(save_dir): os.makedirs(save_dir)
-        if not os.path.exists(f'{save_dir}/{today}'): os.makedirs(f'{save_dir}/{today}')
-        if not os.path.exists(self.exp_path): 
-            os.makedirs(self.exp_path)
-            os.makedirs(f"{self.exp_path}/ckpts")
-            os.makedirs(f"{self.exp_path}/optims")
-            os.makedirs(f"{self.exp_path}/figs")
-            os.makedirs(f"{self.exp_path}/logs")
-        else:
-            raise Exception(f"Experiment path {self.exp_path} already exists")
-        conf = copy.deepcopy(self.kwargs)
-        conf['exp_path'] = self.exp_path
-        conf = OmegaConf.create(conf)
-        with open(f'{self.exp_path}/kwargs.yaml', 'w') as fp: 
-            OmegaConf.save(config=conf, f=fp)
+        # self.events = self.kwargs['events'] if 'events' in self.kwargs.keys() else None
 
     def init(self,device):
-        # wandb.init()
         torch.backends.cudnn.enabled = False
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed(self.seed)
@@ -234,13 +215,32 @@ class Trainer(object):
             self.end_epoch(module,epoch)
     def setup_for_distributed(self,is_master):
         import builtins as __builtin__
-        builtin_print = __builtin__.print
+        # builtin_print = __builtin__.print
 
-        def print(*args, **kwargs):
-            force = kwargs.pop('force', False)
-            if is_master or force:
-                builtin_print(*args, **kwargs)
-        __builtin__.print = print
+        # def print(*args, **kwargs):
+        #     force = kwargs.pop('force', False)
+        #     if is_master or force:
+        #         builtin_print(*args, **kwargs)
+        print('asdasdaasdasdadasasasd', self.logger.info)
+        print(self.logger.info)
+        __builtin__.print = self.logger.info
+    def setup_worker_logging(self,rank):
+        queue_handler = QueueHandler(self.logger.log_queue)
+
+        # Add a filter that modifies the message to put the
+        # rank in the log format
+        worker_filter = WorkerLogFilter(rank)
+        queue_handler.addFilter(worker_filter)
+
+        queue_handler.setLevel(logging.INFO)
+
+        root_logger = logging.getLogger()
+        root_logger.addHandler(queue_handler)
+
+        # Default logger level is WARNING, hence the change. Otherwise, any worker logs
+        # are not going to get bubbled up to the parent's logger handlers from where the
+        # actual logs are written to the output
+        root_logger.setLevel(logging.INFO)
     def init_process(
         self,
         rank, # rank of the process
@@ -249,57 +249,38 @@ class Trainer(object):
         # backend='gloo',# good for single node
         backend='nccl' # the best for CUDA
     ):
+        # rank = dist.get_rank()
+        self.setup_worker_logging(rank)
+        logging.info("Test worker log")
+        logging.error("Test worker error log")
+        torch.cuda.set_device(rank)
         # information used for rank 0
         os.environ['MASTER_ADDR'] = self.trainer_kwargs['ip']
         os.environ['MASTER_PORT'] = self.trainer_kwargs['port']
         dist.init_process_group(backend, rank=rank, world_size=world_size)
-        dist.barrier()
-        self.setup_for_distributed(rank == 0)
+        # dist.barrier()
+        # self.setup_for_distributed(rank == 0)
+        # self.setup_for_distributed(False)
         self._fit()
     def fit(self):
         if self.distributed:
             world_size = len(self.trainer_kwargs['gpus'])
             processes = []
-            mp.set_start_method("spawn")
-            for rank in range(world_size):
-                print(f"Starting process {rank}")
-                p = mp.Process(target=self.init_process, args=(rank, world_size))
-                p.start()
-                processes.append(p)
-
-            for p in processes:
-                p.join()
+            try:
+                # print(torch.multiprocessing.get_start_method())
+                # mp.set_start_method("spawn")
+                ctx = mp.get_context("spawn")
+                # mp.spawn(self.init_process, args=(world_size,), nprocs=world_size)
+                for rank in range(world_size):
+                    print(f"Starting process {rank}")
+                    p = ctx.Process(target=self.init_process, args=(rank, world_size))
+                    # p = mp.Process(target=self.init_process, args=(world_size,))
+                    processes.append(p)
+                for p in processes:
+                    p.start()
+                for p in processes:
+                    p.join()
+            except RuntimeError as e:
+                print(e)
         else:
             self._fit()
-
-
-
-
-
-
-
-
-
-
-
-
-
-        # event:end_fit
-        # events:
-        #  verify
-
-        #  fit_start
-        #    epoch_start
-
-        #    train_before
-        #    train
-        #      training_step
-        #    train_after
-
-        #    eval_before
-        #    eval
-        #      evaluation_step
-        #    eval_after
-
-        #    epoch_end
-        #  fit_end

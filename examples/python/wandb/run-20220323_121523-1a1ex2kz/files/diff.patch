@@ -1,0 +1,316 @@
+diff --git a/src/cfg/project/default.yaml b/src/cfg/project/default.yaml
+index b460fe4..8a7d3ee 100644
+--- a/src/cfg/project/default.yaml
++++ b/src/cfg/project/default.yaml
+@@ -1,2 +1,3 @@
++name: mnist_training_test
+ root_dir: ./
+ save_dir: ./outputs
+\ No newline at end of file
+diff --git a/src/logger.py b/src/logger.py
+index 077ea86..c68d385 100644
+--- a/src/logger.py
++++ b/src/logger.py
+@@ -1,36 +1,70 @@
+-import imp
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
+-from rich import pretty
+-pretty.install()
+-import tqdm
+-import tqdm.rich
++import logging
++from rich.logging import RichHandler
++import wandb
+ import logging
+ import random
+ import string
+ from datetime import datetime
+-import yaml, json
+ import os, sys, time, copy, pickle
+ from omegaconf import OmegaConf
+-import wandb
+-import tensorboardX
+-# logger for wandb
++
++from logging import Filter
++from logging.handlers import QueueHandler, QueueListener
++
++import torch
++import torch.distributed as dist
++import torch.multiprocessing as mp
++from torch.multiprocessing import Queue
++# credits:
++# torch.distributed and logger: https://gist.github.com/scarecrow1123/967a97f553697743ae4ec7af36690da6
++class WorkerLogFilter(Filter):
++    def __init__(self, rank=-1):
++        super().__init__()
++        self._rank = rank
++
++    def filter(self, record):
++        if self._rank != -1:
++            record.msg = f"Rank {self._rank} | {record.msg}"
++        return True
+ class Logger(object):
+-    def __init__(self, wandb=False,tb=False,**kwargs):
+-        self.exp_name = kwargs["exp_name"].replace(" ","_")
+-        self.trainer_kwargs = kwargs["trainer_kwargs"]
+-        self.save_dir = self.trainer_kwargs['save_dir'] if self.trainer_kwargs['save_dir'][-1] != '/' else self.trainer_kwargs['save_dir'][:-1]
+-        self.loggers = {}
+-        self.set_exp_path()
+-        if wandb: self.init_wandb()
+-        if tb: self.init_tensorboard()
+-    def set_exp_path(self):
++    def __init__(self, project, exp_name,save_dir,kwargs={},distributed=False,enable_wandb=False):
++        # self.logger = logging.getLogger("rich")
++        self.project = project
++        self.exp_name = exp_name
++        self.save_dir = save_dir
++        self.kwargs = kwargs
++        self.enable_wandb = enable_wandb
++        self.distributed = distributed
++        self.init()
++        self.log_kwargs()
++        # Multiprocessing queue to which the workers should log their messages
++        self.log_queue = Queue(-1)
++        self.logger = logging.getLogger(__name__)
++        self.format = "%(message)s"
++        self.datafmt = "[%X]"
++        self.set_handlers()
++        print(f"Logger initialized",distributed)
++        if self.distributed:
++            self.listener = QueueListener(self.log_queue, *self.handlers, respect_handler_level=True)
++            self.listener.start()
++        else:
++            logging.basicConfig(
++                format=self.format, 
++                datefmt=self.datafmt, 
++                handlers=self.handlers
++            )
++    def init(self):
+         random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+         today = datetime.today().strftime("%Y-%m-%d")
+         curr_time = datetime.today().strftime("%H-%M")
+         self.exp_path = f'{self.save_dir}/{today}/{curr_time}-{self.exp_name}-{random_str}'
+-        # create dir if not exists
++        self.create_log(today)
++        if self.enable_wandb:
++            wandb.init(
++                project=self.project,
++                config=self.kwargs
++            )
++    def create_log(self, today):
+         if not os.path.exists(self.save_dir): os.makedirs(self.save_dir)
+         if not os.path.exists(f'{self.save_dir}/{today}'): os.makedirs(f'{self.save_dir}/{today}')
+         if not os.path.exists(self.exp_path): 
+@@ -41,36 +75,32 @@ class Logger(object):
+             os.makedirs(f"{self.exp_path}/logs")
+         else:
+             raise Exception(f"Experiment path {self.exp_path} already exists")
++    def log_kwargs(self):
+         conf = copy.deepcopy(self.kwargs)
+         conf['exp_path'] = self.exp_path
+         conf = OmegaConf.create(conf)
+         with open(f'{self.exp_path}/kwargs.yaml', 'w') as fp: 
+             OmegaConf.save(config=conf, f=fp)
+-        self.paths = {
+-            'exp_path': self.exp_path,
+-            'exp_name': self.exp_name,
+-            'save_dir': self.save_dir,
+-            'kwargs': f'{self.exp_path}/kwargs.yaml',
+-            'ckpts': f'{self.exp_path}/ckpts',
+-            'optims': f'{self.exp_path}/optims',
+-            'figs': f'{self.exp_path}/figs',
+-        }
+-    def init_wandb(self):
+-        wandb.init(
+-            # project=self.exp_name,
+-            # name=self.exp_name,
+-            # dir=self.exp_path,
+-            # id=self.exp_name,
+-            # config=self.trainer_kwargs,
+-            # group=self.exp_name,
+-        )
+-        self.loggers['wand'] = wandb
+-    def init_tensorboard(self):
+-        self.loggers['tb'] = tensorboardX.SummaryWriter(log_dir=self.exp_path)
+-    def step_log(self, mode,step_counter,history):
+-        if 'wandb' in self.loggers.keys():
+-            wandb.log({
+-                f"{mode}_loss": history[mode]['loss'][-1],
+-            },step=step_counter[mode])
+-        if 'tb' in self.loggers.keys():
+-            self.loggers['tb'].add_scalar(f"{mode}_loss", history[mode]['loss'][-1], step_counter[mode])
+\ No newline at end of file
++    def watch(self,model,log_freq=100):
++        if self.enable_wandb:
++            wandb.watch(model, log_freq=log_freq)
++    def set_handlers(self):
++        shell_handler = RichHandler()
++        file_handler = logging.FileHandler("debug.log",mode="w")
++        # shell_handler.setLevel(logging.DEBUG)
++        file_handler.setLevel(logging.DEBUG)
++        fmt_shell = '%(message)s'
++        fmt_file = '%(levelname)s %(asctime)s [%(filename)s:%(funcName)s:%(lineno)d] %(message)s'   
++        shell_formatter = logging.Formatter(fmt_shell)
++        file_formatter = logging.Formatter(fmt_file)  
++        shell_handler.setFormatter(shell_formatter)
++        file_handler.setFormatter(file_formatter)
++        self.handlers = [shell_handler, file_handler]  
++    def info(self, msg): self.logger.info(msg)
++    def error(self, msg): self.logger.error(msg)
++    def warning(self, msg): self.logger.warning(msg)
++    def debug(self, msg): self.logger.debug(msg)
++    def exception(self, msg): self.logger.exception(msg)
++    def log(self, loss):
++        if self.enable_wandb:
++            wandb.log({"loss": loss})
+\ No newline at end of file
+diff --git a/src/train.py b/src/train.py
+index f54ebf9..131e922 100644
+--- a/src/train.py
++++ b/src/train.py
+@@ -51,13 +51,14 @@ def main(cfg : DictConfig) -> None:
+         'seed': cfg.exp.seed if 'seed' in cfg.exp.keys() else 1,
+         'resume': cfg.exp.resume if 'resume' in cfg.exp.keys() else False,
+         'resume_path': cfg.exp.resume_path if 'resume_path' in cfg.exp.keys() else None,
+-        'save_dir': cfg.project.save_dir if 'save_dir' in cfg.project.keys() else '.',
+         'gpus': cfg.exp.gpus if 'gpus' in cfg.exp.keys() else [0],
+         # additional
+         'ip': cfg.exp.ip if 'ip' in cfg.exp.keys() else '127.0.0.1',
+         'port': cfg.exp.port if 'port' in cfg.exp.keys() else '29500',
+     }
+     exp_kwargs = {
++        'project': cfg.project.name,
++        'save_dir': cfg.project.save_dir if 'save_dir' in cfg.project.keys() else '.',
+         'exp_name': cfg.exp.name, 
+         'trainer_kwargs': trainer_kwargs, 
+         'module_kwargs': module_kwargs, 
+diff --git a/src/trainer.py b/src/trainer.py
+index 49a1337..92a7152 100644
+--- a/src/trainer.py
++++ b/src/trainer.py
+@@ -16,7 +16,8 @@ import wandb
+ import torch.distributed as dist
+ import torch.multiprocessing as mp
+ from torch.nn.parallel import DistributedDataParallel as DDP
+-
++from logging.handlers import QueueHandler, QueueListener
++from logger import Logger, WorkerLogFilter
+ class Trainer(object):
+     def __init__(self, module, dataset, distributed,**kwargs):
+         self.module = module
+@@ -24,37 +25,19 @@ class Trainer(object):
+         self.kwargs = copy.deepcopy(kwargs)
+         self.trainer_kwargs = self.kwargs['trainer_kwargs']
+         self.distributed = distributed
++        self.logger = Logger(
++            self.kwargs['project'],
++            self.kwargs['exp_name'],
++            self.kwargs['save_dir'],
++            self.kwargs,
++            distributed
++        )
+         self.seed = self.trainer_kwargs['seed'] if 'seed' in self.trainer_kwargs.keys() else random.randint(1, 10000)
+         self.history = {'train': {'loss': [], 'correct': []}, 'val': {'loss': [], 'correct': []}}
+         self.epoch_history = {'train': {'loss': [], 'acc': []}, 'val': {'loss': [], 'acc': []}}
+-        self.events = self.kwargs['events'] if 'events' in self.kwargs.keys() else None
+-        # self.set_exp_path()
+-    def set_exp_path(self):
+-        random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+-        today = datetime.today().strftime("%Y-%m-%d")
+-        curr_time = datetime.today().strftime("%H-%M")
+-        exp_name = self.kwargs["exp_name"].replace(" ","_")
+-        save_dir = self.trainer_kwargs['save_dir'] if self.trainer_kwargs['save_dir'][-1] != '/' else self.trainer_kwargs['save_dir'][:-1]
+-        self.exp_path = f'{save_dir}/{today}/{curr_time}-{exp_name}-{random_str}'
+-        # create dir if not exists
+-        if not os.path.exists(save_dir): os.makedirs(save_dir)
+-        if not os.path.exists(f'{save_dir}/{today}'): os.makedirs(f'{save_dir}/{today}')
+-        if not os.path.exists(self.exp_path): 
+-            os.makedirs(self.exp_path)
+-            os.makedirs(f"{self.exp_path}/ckpts")
+-            os.makedirs(f"{self.exp_path}/optims")
+-            os.makedirs(f"{self.exp_path}/figs")
+-            os.makedirs(f"{self.exp_path}/logs")
+-        else:
+-            raise Exception(f"Experiment path {self.exp_path} already exists")
+-        conf = copy.deepcopy(self.kwargs)
+-        conf['exp_path'] = self.exp_path
+-        conf = OmegaConf.create(conf)
+-        with open(f'{self.exp_path}/kwargs.yaml', 'w') as fp: 
+-            OmegaConf.save(config=conf, f=fp)
++        # self.events = self.kwargs['events'] if 'events' in self.kwargs.keys() else None
+ 
+     def init(self,device):
+-        # wandb.init()
+         torch.backends.cudnn.enabled = False
+         torch.manual_seed(self.seed)
+         torch.cuda.manual_seed(self.seed)
+@@ -241,14 +224,33 @@ class Trainer(object):
+             if is_master or force:
+                 builtin_print(*args, **kwargs)
+         __builtin__.print = print
++    def setup_worker_logging(self,rank):
++        queue_handler = QueueHandler(self.logger.log_queue)
++
++        # Add a filter that modifies the message to put the
++        # rank in the log format
++        worker_filter = WorkerLogFilter(rank)
++        queue_handler.addFilter(worker_filter)
++
++        # queue_handler.setLevel(logging.INFO)
++
++        root_logger = logging.getLogger()
++        root_logger.addHandler(queue_handler)
++
++        # Default logger level is WARNING, hence the change. Otherwise, any worker logs
++        # are not going to get bubbled up to the parent's logger handlers from where the
++        # actual logs are written to the output
++        # root_logger.setLevel(logging.INFO)
+     def init_process(
+         self,
+-        rank, # rank of the process
++        # rank, # rank of the process
+         world_size, # number of workers
+         # fn, # function to be run
+         # backend='gloo',# good for single node
+         backend='nccl' # the best for CUDA
+     ):
++        rank = dist.get_rank()
++        self.setup_worker_logging(rank)
+         # information used for rank 0
+         os.environ['MASTER_ADDR'] = self.trainer_kwargs['ip']
+         os.environ['MASTER_PORT'] = self.trainer_kwargs['port']
+@@ -260,15 +262,23 @@ class Trainer(object):
+         if self.distributed:
+             world_size = len(self.trainer_kwargs['gpus'])
+             processes = []
+-            mp.set_start_method("spawn")
+-            for rank in range(world_size):
+-                print(f"Starting process {rank}")
+-                p = mp.Process(target=self.init_process, args=(rank, world_size))
+-                p.start()
+-                processes.append(p)
++            try:
++                print(torch.multiprocessing.get_start_method())
++                mp.set_start_method("spawn", force=True)
++                mp.spawn(self.init_process, args=(world_size), nprocs=world_size)
++                # for rank in range(world_size):
++                #     print(f"Starting process {rank}")
++                #     p = mp.Process(target=self.init_process, args=(rank, world_size))
++                #     p.start()
++                #     processes.append(p)
+ 
+-            for p in processes:
+-                p.join()
++                # for p in processes:
++                #     p.join()
++            except RuntimeError:
++                ctx = mp.get_context("spawn")
++                print("ERROR: unable to start multiple processes")
++                print(ctx)
++                print(torch.multiprocessing.get_start_method())
+         else:
+             self._fit()
+ 

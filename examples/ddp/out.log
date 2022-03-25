@@ -1,0 +1,8 @@
+2022-03-23 22:18:03,783 - INFO - Rank 0 | Test worker log
+2022-03-23 22:18:03,791 - INFO - Rank 1 | Test worker log
+2022-03-23 22:18:03,788 - ERROR - Rank 0 | Test worker error log
+2022-03-23 22:18:03,791 - ERROR - Rank 1 | Test worker error log
+2022-03-23 22:18:05,382 - INFO - Rank 1 | Added key: store_based_barrier_key:1 to store for rank: 1
+2022-03-23 22:18:05,383 - INFO - Rank 0 | Added key: store_based_barrier_key:1 to store for rank: 0
+2022-03-23 22:18:05,383 - INFO - Rank 1 | Rank 1: Completed store-based barrier for 2 nodes.
+2022-03-23 22:18:05,383 - INFO - Rank 0 | Rank 0: Completed store-based barrier for 2 nodes.

@@ -1,0 +1,7 @@
+WARNING 2022-03-23 10:44:47,629 [logger.py:warning:112] asdasdasd
+ERROR 2022-03-23 10:44:47,637 [logger.py:error:111] asdasdasdasdasdas
+ERROR 2022-03-23 10:44:47,650 [logger.py:exception:114] unable print!
+Traceback (most recent call last):
+  File "/home/mazen/Projects/ttorch/examples/python/logger.py", line 181, in <module>
+    print(1 / 0)
+ZeroDivisionError: division by zero
