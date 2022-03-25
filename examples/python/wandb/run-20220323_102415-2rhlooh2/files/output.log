@@ -1,8 +1,0 @@
-asdasdsads
-[03/23/22 10:24:19] [31mWARNING [39m asdasdasd                                                                                       ]8;id=801811;file:///home/mazen/Projects/ttorch/examples/python/logger.py\logger.py]8;;\:]8;id=123899;file:///home/mazen/Projects/ttorch/examples/python/logger.py#76\76]8;;\
-                    [1mERROR   [22m asdasdasdasdasdas                                                                               ]8;id=386888;file:///home/mazen/Projects/ttorch/examples/python/logger.py\logger.py]8;;\:]8;id=7739;file:///home/mazen/Projects/ttorch/examples/python/logger.py#75\75]8;;\
-                    [1mERROR   [22m unable print!                                                                                   ]8;id=567512;file:///home/mazen/Projects/ttorch/examples/python/logger.py\logger.py]8;;\:]8;id=572441;file:///home/mazen/Projects/ttorch/examples/python/logger.py#78\78]8;;\
-                             Traceback [1m([22mmost recent call last[1m)[22m:
-                               File [32m"/home/mazen/Projects/ttorch/examples/python/logger.py"[39m, line [1m142[22m, in [1m<module>
-                                 [1mprint(1[22m [35m/[39m [1m0)
-                             ZeroDivisionError: division by zero
