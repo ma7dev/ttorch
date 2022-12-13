@@ -197,7 +197,8 @@ def init_process(
         world_size, # number of workers
         fn, # function to be run
         # backend='gloo',# good for single node
-        backend='gloo' # the best for CUDA
+        # backend='nccl' # the best for CUDA
+        backend='gloo'
     ):
     # information used for rank 0
     os.environ['MASTER_ADDR'] = '127.0.0.1'
